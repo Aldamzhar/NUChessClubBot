@@ -3,6 +3,7 @@ from telegram.ext import Application, CommandHandler, CallbackContext, CallbackQ
 import httpx
 import asyncio
 import logging
+import random
 from config import LICHESS_TOKEN
 
 logging.basicConfig(level=logging.INFO)
@@ -10,7 +11,10 @@ logger = logging.getLogger(__name__)
 
 # Global list to store offline users and a lock for thread-safe operations
 offline_users = []
+private_challenge_lst = []
 lock = asyncio.Lock()
+
+time_formats = ['1+0', '2+1', '3+0', '3+2', '5+0', '5+3', '10+0', '10+5', '15+10', '30+0', '30+20']
 
 async def start(update: Update, context: CallbackContext) -> None:
     keyboard = [[InlineKeyboardButton("Offline", callback_data='offline'),
@@ -88,6 +92,45 @@ async def challenge(update: Update, context: CallbackContext) -> None:
     else:
         await update.message.reply_text("Please specify the time format for the game (e.g., /challenge 3+2).")
 
+async def private_challenge(update: Update, context: CallbackContext) -> None:
+    global private_challenge_lst  # Add this line to use the global variable
+    user = update.effective_user
+    
+    async with lock:
+        if user not in private_challenge_lst:
+            private_challenge_lst.append(user)
+            await update.message.reply_text("You've been added to the private challenge list.")
+            
+            if len(private_challenge_lst) >= 2:
+                player1, player2 = private_challenge_lst[:2]
+                private_challenge_lst = private_challenge_lst[2:]  # Modify the global list
+                
+                # Select a random time format
+                time_format = random.choice(time_formats)
+                minutes, increment = map(int, time_format.split('+'))
+                clock_limit = minutes * 60
+                clock_increment = increment
+                
+                # Create a LiChess challenge
+                url = "https://lichess.org/api/challenge/open"
+                data = {
+                    "clock.limit": clock_limit,
+                    "clock.increment": clock_increment
+                }
+                
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(url, data=data)
+                
+                if response.status_code == 200:
+                    game_url = response.json()['challenge']['url']
+                    message = f"@{player1.username} and @{player2.username}, you've been paired for a private online game!\nGame URL: {game_url}"
+                    await context.bot.send_message(chat_id=player1.id, text=message)
+                    await context.bot.send_message(chat_id=player2.id, text=message)
+                else:
+                    logger.error("Failed to create LiChess challenge")
+        else:
+            await update.message.reply_text("You're already in the private challenge list.")
+
 
 def main() -> None:
     bot_token = LICHESS_TOKEN
@@ -96,6 +139,7 @@ def main() -> None:
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(CommandHandler('challenge', challenge, filters=filters.ChatType.GROUPS))
+    application.add_handler(CommandHandler('privateChallenge', private_challenge))
 
     application.run_polling()
 
